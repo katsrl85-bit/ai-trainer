@@ -460,18 +460,22 @@ def workout_report(activity, comment=""):
 
 
 def week_report(comment=""):
+    """Возвращает (текст, данные для PDF)."""
     today = date.today()
     acts = with_data(activities_between(today - timedelta(days=14), today))
+    profile = athlete_profile()
+    wl = wellness(today)
     payload = {
         "сегодня": today.isoformat(),
         "тренировки_за_14_дней": [slim_activity(a) for a in acts],
-        "профиль_и_зоны_спортсмена": athlete_profile(),
-        "восстановление_7_дней": [slim_wellness(w) for w in wellness(today)],
+        "профиль_и_зоны_спортсмена": profile,
+        "восстановление_7_дней": [slim_wellness(w) for w in wl],
         "единицы": UNITS,
     }
     if comment:
         payload["комментарий_спортсмена"] = comment
-    return claude(system_for(WEEK_PROMPT), with_goal(payload), 4000)
+    text = claude(system_for(WEEK_PROMPT), with_goal(payload), 4000)
+    return text, {"acts": acts, "today": today, "profile": profile, "wellness": wl}
 
 
 def plan_report(comment=""):

@@ -273,21 +273,22 @@ def text_to_flowables(text):
     return out
 
 
+def _decor(c, d):
+    c.saveState()
+    c.setFillColor(ACCENT)
+    c.rect(0, A4[1] - 5 * mm, A4[0], 5 * mm, stroke=0, fill=1)
+    c.setFont("Sans", 7.5)
+    c.setFillColor(MUTED)
+    c.drawString(16 * mm, 8 * mm, "AI тренер · разбор подготовлен Claude по данным Garmin / intervals.icu")
+    c.drawRightString(A4[0] - 16 * mm, 8 * mm, f"стр. {d.page}")
+    c.restoreState()
+
+
 def build_pdf(path, w, coach_text, demo=False):
     doc = SimpleDocTemplate(path, pagesize=A4, leftMargin=16 * mm, rightMargin=16 * mm,
                             topMargin=14 * mm, bottomMargin=14 * mm,
                             title=f"Разбор: {w['name']}", author="AI тренер")
     width = A4[0] - 32 * mm
-
-    def decor(c, d):
-        c.saveState()
-        c.setFillColor(ACCENT)
-        c.rect(0, A4[1] - 5 * mm, A4[0], 5 * mm, stroke=0, fill=1)
-        c.setFont("Sans", 7.5)
-        c.setFillColor(MUTED)
-        c.drawString(16 * mm, 8 * mm, "AI тренер · разбор подготовлен Claude по данным Garmin / intervals.icu")
-        c.drawRightString(A4[0] - 16 * mm, 8 * mm, f"стр. {d.page}")
-        c.restoreState()
 
     story = [
         Paragraph("РАЗБОР ТРЕНИРОВКИ", ParagraphStyle("k", fontName="Sans-Bold", fontSize=8.5,
@@ -321,7 +322,7 @@ def build_pdf(path, w, coach_text, demo=False):
         title = Paragraph("Раскладка по километрам" if _is_km(w["laps"]) else "Круги и отрезки", st["h2"])
         story += [KeepTogether([title, tbl])] if len(rows) <= 25 else [title, tbl]
     story += text_to_flowables(coach_text)
-    doc.build(story, onFirstPage=decor, onLaterPages=decor)
+    doc.build(story, onFirstPage=_decor, onLaterPages=_decor)
 
 
 # ---------------------------------------------------------------- данные intervals.icu -> отчёт
@@ -440,3 +441,164 @@ def short_caption(activity, text):
     if len(first) > 600:
         first = first[:600].rsplit(" ", 1)[0] + "…"
     return f"🏃 {d['name']}\n{nums}\n\n{first}\n\nПолный разбор — в PDF 👇".strip()
+
+
+
+# ---------------------------------------------------------------- итоги недели
+WD_SHORT = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+MONTHS_SHORT = ["янв", "фев", "мар", "апр", "мая", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"]
+
+
+def _adate(a):
+    from datetime import date
+    try:
+        return date.fromisoformat(str(a.get("start_date_local", ""))[:10])
+    except ValueError:
+        return None
+
+
+def _totals(acts):
+    dist = sum(a.get("distance") or 0 for a in acts)
+    sec = sum(a.get("moving_time") or 0 for a in acts)
+    load = sum(a.get("icu_training_load") or 0 for a in acts)
+    hr_w = sum((a.get("average_heartrate") or 0) * (a.get("moving_time") or 0) for a in acts
+               if a.get("average_heartrate"))
+    hr_t = sum(a.get("moving_time") or 0 for a in acts if a.get("average_heartrate"))
+    runs = [a for a in acts if a.get("type") in RUN_TYPES and a.get("distance") and a.get("moving_time")]
+    rd, rt = sum(a["distance"] for a in runs), sum(a["moving_time"] for a in runs)
+    return {"dist": dist, "sec": sec, "load": load, "n": len(acts),
+            "hr": hr_w / hr_t if hr_t else None, "run_pace": rt / (rd / 1000) if rd else None}
+
+
+def _delta(cur, prev, unit_pct=True):
+    if not prev:
+        return "на прошлой неделе не было" if not prev and cur else ""
+    pct = (cur - prev) / prev * 100
+    return f"{pct:+.0f}% к прошлой неделе".replace("-", "−")
+
+
+def build_week_data(acts, today, profile=None, wellness=None):
+    """acts — тренировки за 14 дней. None, если за последние 7 дней тренировок нет."""
+    from datetime import timedelta
+    start = today - timedelta(days=6)
+    cur = [a for a in acts if _adate(a) and _adate(a) >= start]
+    prev = [a for a in acts if _adate(a) and today - timedelta(days=13) <= _adate(a) < start]
+    if not cur:
+        return None
+    c, p = _totals(cur), _totals(prev)
+
+    def lab(base, d):
+        return f"{base} · {d}" if d else base
+
+    kpis = [
+        (km_str(c["dist"]), lab("Дистанция", _delta(c["dist"], p["dist"]))),
+        (time_str(c["sec"]), lab("Время в движении", _delta(c["sec"], p["sec"]))),
+        (str(c["n"]), lab("Тренировок", f"{p['n']} на прошлой неделе")),
+        (str(int(round(c["load"]))) if c["load"] else "—",
+         lab("Нагрузка", _delta(c["load"], p["load"]) if c["load"] else "")),
+        (str(int(round(c["hr"]))) if c["hr"] else "—", "Средний пульс, уд/мин"),
+        (f"{fmt_pace(c['run_pace'])} /км" if c["run_pace"] else "—", "Средний темп бега"),
+    ]
+
+    days = []
+    for i in range(14):
+        d = today - timedelta(days=13 - i)
+        km = sum((a.get("distance") or 0) for a in acts if _adate(a) == d) / 1000
+        days.append({"label": f"{WD_SHORT[d.weekday()]} {d.day}", "km": km, "current": d >= start})
+
+    names = None
+    for ss in (profile or {}).get("зоны_по_видам_спорта", []):
+        if ss.get("hr_zone_names"):
+            names = ss["hr_zone_names"]
+            break
+    zsum = {}
+    for a in cur:
+        for i, sec in enumerate(a.get("icu_hr_zone_times") or []):
+            zsum[i] = zsum.get(i, 0) + (_num(sec) or 0)
+    zones = [((f"Z{i + 1}" + (f" {names[i]}" if names and i < len(names) else ""))[:22], zsum[i] / 60)
+             for i in sorted(zsum)]
+
+    rows = []
+    for a in sorted(cur, key=lambda a: a.get("start_date_local", "")):
+        d = _adate(a)
+        pc = pace_sec(a.get("average_speed")) if a.get("type") in RUN_TYPES else None
+        rows.append([f"{WD_SHORT[d.weekday()]} {d.day}.{d.month:02d}", (a.get("name") or "Тренировка")[:26],
+                     km_str(a.get("distance")), time_str(a.get("moving_time")),
+                     f"{fmt_pace(pc)}" if pc else "—",
+                     str(int(round(a["average_heartrate"]))) if a.get("average_heartrate") else "—",
+                     str(int(round(a["icu_training_load"]))) if a.get("icu_training_load") is not None else "—"])
+
+    d1, d2 = start, today
+    period = (f"{d1.day}–{d2.day} {MONTHS[d2.month - 1]} {d2.year}" if d1.month == d2.month else
+              f"{d1.day} {MONTHS[d1.month - 1]} – {d2.day} {MONTHS[d2.month - 1]} {d2.year}")
+    return {"period": period, "short_period": f"{d1.day}.{d1.month:02d}–{d2.day}.{d2.month:02d}",
+            "subtitle": f"Тренировок за неделю: {c['n']} · сравнение с предыдущими 7 днями", "kpis": kpis, "days": days,
+            "zones": zones, "rows": rows}
+
+
+def chart_days(days):
+    if not any(d["km"] for d in days):
+        return None
+    x = list(range(len(days)))
+    fig, ax = plt.subplots(figsize=(7.2, 2.5), dpi=200)
+    ax.bar(x, [d["km"] for d in days], width=0.66,
+           color=[PACE_C if d["current"] else "#BFD3F8" for d in days])
+    top = max(d["km"] for d in days)
+    for xi, d in zip(x, days):
+        if d["km"]:
+            ax.text(xi, d["km"] + top * 0.025, f"{d['km']:.1f}".replace(".", ","), ha="center",
+                    va="bottom", fontsize=6.8, color="#1F2328")
+    ax.set_xticks(x)
+    ax.set_xticklabels([d["label"] for d in days], fontsize=6.6)
+    ax.set_ylim(0, top * 1.22)
+    ax.axvline(6.5, color="#D1D5DB", lw=0.9, ls="--")
+    ax.text(3, top * 1.17, "прошлая неделя", ha="center", fontsize=7.2, color="#6B7280")
+    ax.text(10, top * 1.17, "эта неделя", ha="center", fontsize=7.2, color=PACE_C)
+    ax.set_title("Объём по дням, км", fontsize=9, loc="left", color="#1F2328")
+    ax.tick_params(length=0, labelsize=7)
+    ax.yaxis.set_visible(False)
+    for sp in ax.spines.values():
+        sp.set_visible(False)
+    ax.grid(axis="y", color="#EEF0F3", lw=0.8)
+    ax.set_axisbelow(True)
+    fig.tight_layout()
+    return fig
+
+
+def build_week_pdf(path, wk, coach_text):
+    doc = SimpleDocTemplate(path, pagesize=A4, leftMargin=16 * mm, rightMargin=16 * mm,
+                            topMargin=14 * mm, bottomMargin=14 * mm,
+                            title=f"Итоги недели {wk['period']}", author="AI тренер")
+    width = A4[0] - 32 * mm
+    story = [Paragraph("ИТОГИ НЕДЕЛИ", ParagraphStyle("k", fontName="Sans-Bold", fontSize=8.5,
+                                                       textColor=ACCENT, leading=12)),
+             Paragraph(wk["period"], st["h1"]), Paragraph(wk["subtitle"], st["sub"]),
+             Spacer(1, 8), kpi_table(wk["kpis"], width), Spacer(1, 8)]
+    for fig in (chart_days(wk["days"]), chart_zones(wk["zones"]) if wk["zones"] else None):
+        if fig is not None:
+            story += [fig_to_image(fig, width / mm), Spacer(1, 2)]
+    head = ["День", "Тренировка", "Дистанция", "Время", "Темп", "Пульс", "Нагрузка"]
+    tbl = Table([head] + wk["rows"], colWidths=[width * f for f in (0.12, 0.30, 0.14, 0.11, 0.10, 0.10, 0.13)],
+                repeatRows=1)
+    tbl.setStyle(TableStyle([
+        ("FONT", (0, 0), (-1, 0), "Sans-Bold", 8.3), ("FONT", (0, 1), (-1, -1), "Sans", 8.3),
+        ("TEXTCOLOR", (0, 0), (-1, 0), MUTED), ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("ALIGN", (1, 0), (1, -1), "LEFT"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, PANEL]),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.8, colors.HexColor("#D1D5DB")),
+        ("TOPPADDING", (0, 0), (-1, -1), 3.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 3.5)]))
+    story += [KeepTogether([Paragraph("Тренировки недели", st["h2"]), tbl])]
+    story += text_to_flowables(coach_text)
+    doc.build(story, onFirstPage=_decor, onLaterPages=_decor)
+
+
+def short_week_caption(wk, text):
+    k = {lab.split(" · ")[0]: val for val, lab in wk["kpis"]}
+    nums = f"{k['Дистанция']} · {k['Тренировок']} трен. · {k['Время в движении']}"
+    first = ""
+    blocks = text.split("## ")
+    if len(blocks) > 1 and "\n" in blocks[1]:
+        first = blocks[1].split("\n", 1)[1].strip().replace("**", "")
+    if len(first) > 600:
+        first = first[:600].rsplit(" ", 1)[0] + "…"
+    return f"📊 Итоги недели {wk['short_period']}\n{nums}\n\n{first}\n\nПолный разбор — в PDF 👇".strip()

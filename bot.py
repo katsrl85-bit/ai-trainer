@@ -103,6 +103,29 @@ def deliver_workout(activity, comment, st):
     print(f"Разбор отправлен: {activity.get('name')} ({aid})")
 
 
+def deliver_week(comment):
+    """Итоги недели -> Telegram (PDF и/или текст)."""
+    text, data = coach.week_report(comment)
+    sent = False
+    if REPORT_FORMAT in ("pdf", "both"):
+        try:
+            import report_pdf
+            wk = report_pdf.build_week_data(data["acts"], data["today"], data["profile"],
+                                            data["wellness"])
+            if wk:
+                path = os.path.join(tempfile.gettempdir(), "week.pdf")
+                report_pdf.build_week_pdf(path, wk, text)
+                coach.send_document(path, f"Итоги недели {wk['short_period']}.pdf",
+                                    caption=report_pdf.short_week_caption(wk, text))
+                sent = True
+        except Exception:
+            traceback.print_exc()
+            say("Не получилось собрать PDF, присылаю итоги текстом.")
+    if REPORT_FORMAT in ("text", "both") or not sent:
+        say(text)
+    print("Итоги недели отправлены")
+
+
 def describe(a):
     d = coach.activity_date(a)
     km = (a.get("distance") or 0) / 1000
@@ -193,7 +216,7 @@ def handle_message(text, st):
         return
     if word in ("week", "неделя", "неделю", "итоги"):
         say("Принял, готовлю итоги недели…")
-        say(coach.week_report(rest))
+        deliver_week(rest)
         return
     if word in ("plan", "план"):
         say("Принял, составляю план на ближайшие дни…")
