@@ -16,17 +16,87 @@ from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
                                 TableStyle, Image, KeepTogether)
 
 FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts") + os.sep
-pdfmetrics.registerFont(TTFont("Sans", FONT_DIR + "DejaVuSans.ttf"))
-pdfmetrics.registerFont(TTFont("Sans-Bold", FONT_DIR + "DejaVuSans-Bold.ttf"))
+
+
+def _otf_to_ttf(src, dst):
+    """reportlab понимает только TrueType: переводим CFF-контуры OTF в TrueType."""
+    from fontTools.ttLib import TTFont as FT, newTable
+    from fontTools.pens.cu2quPen import Cu2QuPen
+    from fontTools.pens.ttGlyphPen import TTGlyphPen
+    f = FT(src)
+    if "glyf" in f:
+        f.save(dst)
+        return
+    gs, order, glyphs = f.getGlyphSet(), f.getGlyphOrder(), {}
+    for g in order:
+        pen = TTGlyphPen(gs)
+        gs[g].draw(Cu2QuPen(pen, 1.0, reverse_direction=True))
+        glyphs[g] = pen.glyph()
+    f["loca"] = newTable("loca")
+    f["glyf"] = t = newTable("glyf")
+    t.glyphOrder, t.glyphs = order, glyphs
+    for tag in ("CFF ", "CFF2", "VORG", "DSIG"):
+        if tag in f:
+            del f[tag]
+    m = f["maxp"]
+    m.tableVersion = 0x00010000
+    for a in ("maxZones", "maxTwilightPoints", "maxStorage", "maxFunctionDefs",
+              "maxInstructionDefs", "maxStackElements", "maxSizeOfInstructions",
+              "maxComponentElements", "maxPoints", "maxContours", "maxCompositePoints",
+              "maxCompositeContours", "maxComponentDepth"):
+        setattr(m, a, 0)
+    m.maxZones = 1
+    f["head"].glyphDataFormat = 0
+    f["post"].formatType = 3.0
+    f.sfntVersion = "\x00\x01\x00\x00"
+    f.save(dst)
+
+
+def _custom_font(var_b64, var_file, name):
+    """Шрифт из секрета (base64 от gzip-файла) или из локального файла. None, если нет."""
+    import base64
+    import gzip
+    import tempfile
+    try:
+        if os.environ.get(var_b64):
+            raw = base64.b64decode("".join(os.environ[var_b64].split()))
+            try:
+                raw = gzip.decompress(raw)
+            except OSError:
+                pass
+        elif os.environ.get(var_file) and os.path.exists(os.environ[var_file]):
+            with open(os.environ[var_file], "rb") as fh:
+                raw = fh.read()
+        else:
+            return None
+        d = tempfile.mkdtemp()
+        src, dst = os.path.join(d, name + ".otf"), os.path.join(d, name + ".ttf")
+        with open(src, "wb") as fh:
+            fh.write(raw)
+        _otf_to_ttf(src, dst)
+        return dst
+    except Exception as e:
+        print(f"Шрифт {name} не подключён ({e}), использую стандартный")
+        return None
+
+
+_reg = _custom_font("LM_FONT_B64", "LM_FONT_FILE", "lm-regular")
+_bold = _custom_font("LM_FONT_BOLD_B64", "LM_FONT_BOLD_FILE", "lm-bold")
+if _reg:
+    REG, BOLD = _reg, _bold or _reg   # нет жирного начертания — заголовки обычным
+else:
+    REG, BOLD = FONT_DIR + "DejaVuSans.ttf", FONT_DIR + "DejaVuSans-Bold.ttf"
+pdfmetrics.registerFont(TTFont("Sans", REG))
+pdfmetrics.registerFont(TTFont("Sans-Bold", BOLD))
 from reportlab.lib.fonts import addMapping
 addMapping("Sans", 0, 0, "Sans"); addMapping("Sans", 1, 0, "Sans-Bold")
 addMapping("Sans", 0, 1, "Sans"); addMapping("Sans", 1, 1, "Sans-Bold")
-for _f in ("DejaVuSans.ttf", "DejaVuSans-Bold.ttf"):
+for _f in {REG, BOLD}:
     try:
-        font_manager.fontManager.addfont(FONT_DIR + _f)
+        font_manager.fontManager.addfont(_f)
     except Exception:
         pass
-plt.rcParams["font.family"] = "DejaVu Sans"
+plt.rcParams["font.family"] = font_manager.FontProperties(fname=REG).get_name()
 
 ACCENT = colors.HexColor("#E84C3D")
 INK = colors.HexColor("#1F2328")

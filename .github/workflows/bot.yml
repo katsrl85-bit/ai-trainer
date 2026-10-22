@@ -43,6 +43,8 @@ jobs:
           ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL }}
           REPORT_FORMAT: ${{ vars.REPORT_FORMAT }}
           AUTO_ANALYZE: ${{ vars.AUTO_ANALYZE }}
+          LM_FONT_B64: ${{ secrets.LM_FONT_B64 }}
+          LM_FONT_BOLD_B64: ${{ secrets.LM_FONT_BOLD_B64 }}
 
       - name: Сохранить состояние бота
         if: always() && hashFiles('state.json') != ''

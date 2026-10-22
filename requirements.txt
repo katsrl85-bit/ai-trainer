@@ -1,3 +1,4 @@
 requests==2.32.3
 reportlab==4.2.5
 matplotlib==3.9.2
+fonttools==4.54.1
