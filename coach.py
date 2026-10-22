@@ -123,6 +123,17 @@ def parse_goal_date(text, today=None):
     return None
 
 
+GOAL_HINTS = ("марафон", "забег", "хочу", "цель", "трейл", "ультра", "полумарафон", "соревнован")
+
+
+def looks_like_goal(text):
+    """Похоже ли сообщение на описание старта: есть дата или «марафон/забег/хочу…»."""
+    if parse_goal_date(text):
+        return True
+    t = text.lower()
+    return any(h in t for h in GOAL_HINTS)
+
+
 def goal_block(today=None):
     """Данные цели для Claude или None."""
     if not GOAL or not GOAL.get("text"):
@@ -529,9 +540,31 @@ def split_message(text, limit=3900):
     return [p for p in parts if p.strip()]
 
 
-def send_text(text, chat_id=None):
-    for chunk in split_message(to_plain(text)):
-        tg("sendMessage", json={"chat_id": chat_id or TELEGRAM_CHAT_ID, "text": chunk})
+# постоянные кнопки под полем ввода
+KEYBOARD = {
+    "keyboard": [[{"text": "🎯 Цель"}, {"text": "🔁 Повтор"}],
+                 [{"text": "📅 План"}, {"text": "📊 Неделя"}]],
+    "resize_keyboard": True,
+    "is_persistent": True,
+    "input_field_placeholder": "Напиши, как прошла тренировка…",
+}
+
+COMMANDS = [
+    {"command": "goal", "description": "🎯 Цель-старт"},
+    {"command": "plan", "description": "📅 План на ближайшие дни"},
+    {"command": "week", "description": "📊 Итоги недели"},
+    {"command": "again", "description": "🔁 Разобрать последнюю тренировку ещё раз"},
+    {"command": "start", "description": "ℹ️ Справка"},
+]
+
+
+def send_text(text, chat_id=None, keyboard=False):
+    chunks = split_message(to_plain(text))
+    for i, chunk in enumerate(chunks):
+        body = {"chat_id": chat_id or TELEGRAM_CHAT_ID, "text": chunk}
+        if keyboard and i == len(chunks) - 1:   # кнопки цепляем к последнему сообщению
+            body["reply_markup"] = KEYBOARD
+        tg("sendMessage", json=body)
 
 
 def send_document(path, filename, caption="", chat_id=None):

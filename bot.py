@@ -7,6 +7,7 @@
 """
 import json
 import os
+import re
 import sys
 import tempfile
 import traceback
@@ -31,6 +32,7 @@ HELP = (
     "/goal — цель-старт: «/goal полумарафон 15 ноября 2026, старт в 10:00, хочу 1:45». "
     "Дальше учитываю её в разборах и планах. «/goal» без текста — показать цель, "
     "«/goal сброс» — удалить\n\n"
+    "Те же команды есть кнопками под полем ввода.\n\n"
     "Отвечаю не мгновенно: я проверяю сообщения примерно раз в 10 минут."
 )
 
@@ -54,8 +56,26 @@ def save_state(st):
         json.dump(st, f, ensure_ascii=False)
 
 
-def say(text):
-    coach.send_text(text)
+def say(text, keyboard=False):
+    coach.send_text(text, keyboard=keyboard)
+
+
+UI_VERSION = 1
+
+
+def ensure_ui(st):
+    """Один раз: меню команд («/») и кнопки под полем ввода."""
+    if st.get("ui_v") == UI_VERSION:
+        return
+    try:
+        coach.tg("setMyCommands", json={"commands": coach.COMMANDS})
+    except Exception:
+        traceback.print_exc()
+    say("Добавил кнопки внизу 👇\n\n🎯 Цель — задать старт, к которому ты готовишься\n"
+        "📅 План — план на ближайшие дни\n📊 Неделя — итоги недели\n"
+        "🔁 Повтор — ещё раз разобрать последнюю тренировку\n\n"
+        "А после тренировки можно просто написать мне, как она прошла.", keyboard=True)
+    st["ui_v"] = UI_VERSION
 
 
 def deliver_workout(activity, comment, st):
@@ -90,7 +110,9 @@ def describe(a):
 
 
 GOAL_WORDS = ("goal", "цель", "старт")
-GOAL_OFF = ("off", "сброс", "удалить", "отмена", "нет", "clear", "delete")
+GOAL_OFF = ("off", "сброс", "удалить", "нет", "clear", "delete")
+GOAL_CANCEL = ("отмена", "cancel")
+BUTTON_WORDS = ("цель", "план", "неделя", "повтор")
 GOAL_EXPIRE_DAYS = 21
 
 
@@ -109,13 +131,18 @@ def apply_goal(st):
 def handle_goal(rest, st):
     if not rest:
         g = st.get("goal")
-        if not g:
-            say("Цель пока не задана. Напиши, например: «/goal полумарафон 15 ноября 2026, "
-                "старт в 10:00, хочу 1:45».")
-            return
-        b = coach.goal_block()
-        left = f" До старта {b['дней_до_старта']} дн." if "дней_до_старта" in b else ""
-        say(f"Твоя цель: {g['text']}.{left}")
+        if g:
+            b = coach.goal_block()
+            left = f" До старта {b['дней_до_старта']} дн." if "дней_до_старта" in b else ""
+            say(f"Твоя цель: {g['text']}.{left}\n\nЧтобы изменить, отправь новую цель следующим "
+                "сообщением. «сброс» — удалить цель, «отмена» — оставить как есть.")
+        else:
+            say("Цель пока не задана. Отправь её следующим сообщением, например: «полумарафон "
+                "15 ноября 2026, старт в 10:00, хочу 1:45». «отмена» — не задавать.")
+        st["awaiting_goal"] = now().isoformat()
+        return
+    if rest.strip().lower() in GOAL_CANCEL:
+        say("Ок, цель не меняю.")
         return
     if rest.strip().lower() in GOAL_OFF:
         st["goal"] = coach.GOAL = None
@@ -136,16 +163,29 @@ def handle_goal(rest, st):
 
 
 def handle_message(text, st):
-    t = text.strip()
+    t = re.sub(r"^[^\w/]+", "", text.strip()).strip() or text.strip()   # «🎯 Цель» -> «Цель»
     low = t.lower().lstrip("/")
     word = low.split()[0] if low else ""
     rest = t.split(maxsplit=1)[1] if len(t.split(maxsplit=1)) > 1 else ""
+
+    # ждём текст цели после нажатия «🎯 Цель» (2 часа)
+    waiting = st.get("awaiting_goal")
+    if waiting:
+        st["awaiting_goal"] = None
+        fresh = now() - datetime.fromisoformat(waiting) < timedelta(hours=2)
+        is_cmd = t.startswith("/") or t.lower() in BUTTON_WORDS
+        answer = t.lower() in GOAL_OFF + GOAL_CANCEL or coach.looks_like_goal(t)
+        # обычный комментарий о тренировке цель не затирает: дальше пойдёт как комментарий
+        if fresh and not is_cmd and answer:
+            handle_goal(t, st)
+            return
 
     # цель: «/goal …», «/цель …» или «цель: …» / «старт: …» (с двоеточием, чтобы не путать
     # с обычным комментарием вроде «старт был тяжёлый»)
     explicit = t.startswith("/") or word.endswith(":")
     gword = word.rstrip(":")
-    if explicit and gword in GOAL_WORDS and (rest or gword in ("goal", "цель")):
+    bare_goal = not rest and gword in ("goal", "цель")      # кнопка «🎯 Цель» или /goal
+    if bare_goal or (explicit and gword in GOAL_WORDS and rest):
         handle_goal(rest, st)
         return
     if word in ("start", "help", "помощь", "старт") and not rest:
@@ -211,9 +251,11 @@ def main():
     st = st or {"offset": 0, "seen": [], "analysed": [], "pending": None}
     st.setdefault("pending", None)
     st.setdefault("goal", None)
+    st.setdefault("awaiting_goal", None)
     failed = False
     try:
         apply_goal(st)
+        ensure_ui(st)
     except Exception:
         traceback.print_exc()
 
