@@ -69,6 +69,90 @@ PLAN_PROMPT = STYLE + """
 ## 💬 Совет тренера — одна мысль."""
 
 
+# ---------------------------------------------------------------- цель (старт)
+GOAL = None   # {"text": ..., "date": "YYYY-MM-DD" | None}; выставляет bot.py из состояния
+
+MONTHS_RU = {"января": 1, "февраля": 2, "марта": 3, "апреля": 4, "мая": 5, "июня": 6,
+             "июля": 7, "августа": 8, "сентября": 9, "октября": 10, "ноября": 11,
+             "декабря": 12, "янв": 1, "фев": 2, "мар": 3, "апр": 4, "июн": 6, "июл": 7,
+             "авг": 8, "сен": 9, "сент": 9, "окт": 10, "ноя": 11, "дек": 12}
+
+GOAL_RULES = """
+
+У спортсмена есть цель — старт (поле «цель_спортсмена»). Учитывай её во всём:
+- Скажи, сколько дней до старта и на каком этапе подготовки он сейчас: набор базы (больше \
+~10 недель), специальный блок, подводка (последние 7–10 дней, объём снижается), предстартовая \
+неделя.
+- Если в цели есть желаемый результат, посчитай целевой темп (мин/км) из дистанции и результата \
+и сверяй с ним тренировки. Честно оцени по его темпу, пульсу и объёму, насколько цель \
+реалистична. Соревновательных результатов у тебя нет, поэтому оценка осторожная; скажи об этом.
+- Планы строй от даты старта: ключевые тренировки, длительные, темповые, подводка. В последние \
+2–3 дня: сон, питание, разминка, раскладка по километрам с учётом времени старта.
+- Если даты старта в цели нет, один раз вежливо попроси написать её.
+- Если старт уже прошёл, попроси прислать результат, разбери забег и предложи план \
+восстановления.
+- В разборе тренировки добавь раздел «## 🏁 К старту» перед планом: что эта тренировка \
+дала для цели и что менять."""
+
+
+def parse_goal_date(text, today=None):
+    """Ищет дату в тексте цели: 15.11.2026, 15.11, 15 ноября [2026]. None, если не нашёл."""
+    import re
+    today = today or date.today()
+    t = text.lower()
+
+    def build(d, m, y):
+        try:
+            if y is None:
+                cand = date(today.year, m, d)
+                return cand if cand >= today - timedelta(days=1) else date(today.year + 1, m, d)
+            y = y + 2000 if y < 100 else y
+            return date(y, m, d)
+        except ValueError:
+            return None
+
+    m = re.search(r"(?<![\d:.,])(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?(?![\d:]|\s*(?:км|km|k\b|м\b))", t)
+    if m:
+        r = build(int(m[1]), int(m[2]), int(m[3]) if m[3] else None)
+        if r:
+            return r
+    names = "|".join(sorted(MONTHS_RU, key=len, reverse=True))
+    m = re.search(rf"(?<!\d)(\d{{1,2}})\s+({names})\w*\.?(?:\s+(\d{{4}}))?", t)
+    if m:
+        return build(int(m[1]), MONTHS_RU[m[2]], int(m[3]) if m[3] else None)
+    return None
+
+
+def goal_block(today=None):
+    """Данные цели для Claude или None."""
+    if not GOAL or not GOAL.get("text"):
+        return None
+    today = today or date.today()
+    out = {"текст": GOAL["text"]}
+    if GOAL.get("date"):
+        d = date.fromisoformat(GOAL["date"])
+        left = (d - today).days
+        out["дата_старта"] = d.isoformat()
+        out["дней_до_старта"] = left
+        out["недель_до_старта"] = round(left / 7, 1)
+        if left < 0:
+            out["старт_уже_прошёл_дней_назад"] = -left
+    else:
+        out["дата_старта"] = "не указана"
+    return out
+
+
+def system_for(base):
+    return base + GOAL_RULES if goal_block() else base
+
+
+def with_goal(payload):
+    g = goal_block()
+    if g:
+        payload["цель_спортсмена"] = g
+    return payload
+
+
 # ---------------------------------------------------------------- intervals.icu
 def icu_get(path, **params):
     r = requests.get(f"{ICU}{path}", params=params, auth=("API_KEY", INTERVALS_API_KEY),
@@ -360,7 +444,7 @@ def workout_report(activity, comment=""):
     }
     if comment:
         payload["комментарий_спортсмена"] = comment
-    text = claude(WORKOUT_PROMPT, payload)
+    text = claude(system_for(WORKOUT_PROMPT), with_goal(payload))
     return text, {"activity": activity, "laps": laps, "profile": profile}
 
 
@@ -376,7 +460,7 @@ def week_report(comment=""):
     }
     if comment:
         payload["комментарий_спортсмена"] = comment
-    return claude(WEEK_PROMPT, payload, 4000)
+    return claude(system_for(WEEK_PROMPT), with_goal(payload), 4000)
 
 
 def plan_report(comment=""):
@@ -391,7 +475,7 @@ def plan_report(comment=""):
     }
     if comment:
         payload["комментарий_спортсмена"] = comment
-    return claude(PLAN_PROMPT, payload, 3000)
+    return claude(system_for(PLAN_PROMPT), with_goal(payload), 3000)
 
 
 # ---------------------------------------------------------------- Telegram

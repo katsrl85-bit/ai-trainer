@@ -27,7 +27,10 @@ HELP = (
     "Команды:\n"
     "/week или «неделя» — итоги недели\n"
     "/plan или «план» — план на ближайшие дни\n"
-    "/again или «повтор» — ещё раз разобрать последнюю тренировку\n\n"
+    "/again или «повтор» — ещё раз разобрать последнюю тренировку\n"
+    "/goal — цель-старт: «/goal полумарафон 15 ноября 2026, старт в 10:00, хочу 1:45». "
+    "Дальше учитываю её в разборах и планах. «/goal» без текста — показать цель, "
+    "«/goal сброс» — удалить\n\n"
     "Отвечаю не мгновенно: я проверяю сообщения примерно раз в 10 минут."
 )
 
@@ -86,13 +89,66 @@ def describe(a):
     return f"«{a.get('name', 'Тренировка')}» от {d:%d.%m.%Y}, {km:.1f} км"
 
 
+GOAL_WORDS = ("goal", "цель", "старт")
+GOAL_OFF = ("off", "сброс", "удалить", "отмена", "нет", "clear", "delete")
+GOAL_EXPIRE_DAYS = 21
+
+
+def apply_goal(st):
+    """Передаёт цель из состояния в coach; через 21 день после старта убирает её."""
+    g = st.get("goal")
+    coach.GOAL = g
+    if g and g.get("date"):
+        past = (datetime.now().date() - datetime.fromisoformat(g["date"]).date()).days
+        if past > GOAL_EXPIRE_DAYS:
+            st["goal"] = coach.GOAL = None
+            say(f"Прошло больше {GOAL_EXPIRE_DAYS} дней после твоего старта, цель сняла. "
+                "Напиши /goal, когда выберешь следующий.")
+
+
+def handle_goal(rest, st):
+    if not rest:
+        g = st.get("goal")
+        if not g:
+            say("Цель пока не задана. Напиши, например: «/goal полумарафон 15 ноября 2026, "
+                "старт в 10:00, хочу 1:45».")
+            return
+        b = coach.goal_block()
+        left = f" До старта {b['дней_до_старта']} дн." if "дней_до_старта" in b else ""
+        say(f"Твоя цель: {g['text']}.{left}")
+        return
+    if rest.strip().lower() in GOAL_OFF:
+        st["goal"] = coach.GOAL = None
+        say("Цель удалена.")
+        return
+    d = coach.parse_goal_date(rest)
+    st["goal"] = coach.GOAL = {"text": rest.strip(), "date": d.isoformat() if d else None,
+                               "set": now().isoformat()}
+    if d:
+        left = (d - datetime.now().date()).days
+        when = (f"До старта {left} дн." if left > 0 else
+                "Старт сегодня!" if left == 0 else f"Старт был {-left} дн. назад.")
+        say(f"Принял! Цель: {rest.strip()}.\n{when} Буду учитывать её в разборах и планах.")
+    else:
+        say(f"Записал цель: {rest.strip()}.\n\nДату старта я не нашёл. Напиши её, например: "
+            "«/goal полумарафон 15 ноября 2026, хочу 1:45», тогда смогу считать дни до старта "
+            "и строить план от него.")
+
+
 def handle_message(text, st):
     t = text.strip()
     low = t.lower().lstrip("/")
     word = low.split()[0] if low else ""
     rest = t.split(maxsplit=1)[1] if len(t.split(maxsplit=1)) > 1 else ""
 
-    if word in ("start", "help", "помощь", "старт"):
+    # цель: «/goal …», «/цель …» или «цель: …» / «старт: …» (с двоеточием, чтобы не путать
+    # с обычным комментарием вроде «старт был тяжёлый»)
+    explicit = t.startswith("/") or word.endswith(":")
+    gword = word.rstrip(":")
+    if explicit and gword in GOAL_WORDS and (rest or gword in ("goal", "цель")):
+        handle_goal(rest, st)
+        return
+    if word in ("start", "help", "помощь", "старт") and not rest:
         say(HELP)
         return
     if word in ("week", "неделя", "неделю", "итоги"):
@@ -154,7 +210,12 @@ def main():
     first_run = st is None
     st = st or {"offset": 0, "seen": [], "analysed": [], "pending": None}
     st.setdefault("pending", None)
+    st.setdefault("goal", None)
     failed = False
+    try:
+        apply_goal(st)
+    except Exception:
+        traceback.print_exc()
 
     # 1) сообщения
     try:
