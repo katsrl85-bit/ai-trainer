@@ -34,8 +34,9 @@ WORKOUT_PROMPT = STYLE + """
 ## 👋 Первое впечатление — пару живых фраз о тренировке в целом.
 ## 🎯 Какая была задача — определи тип (восстановительный, лёгкий, длительный, темповый, \
 интервалы, фартлек, забег) по структуре, темпу и пульсу; попал ли в задачу.
-## 🏃 Разбор по ходу тренировки — по кругам/отрезкам: старт, ровность, где ускорился или \
-подсел, раскладка, поведение пульса, дрейф пульса.
+## 🏃 Разбор по ходу тренировки — по километрам из «раскладка_по_километрам» (число \
+километров считай только по ней, не по автоинтервалам): старт, ровность, где ускорился \
+или подсел, раскладка, поведение пульса, дрейф пульса.
 ## ❤️ Пульс и зоны — время в зонах и что это даёт; не было ли «серой зоны».
 ## 🦶 Техника и экономичность — каденс, длина шага и т.п., если есть; 1–2 подсказки.
 ## 📅 Контекст недели — объём, чередование нагрузок, восстановление (сон, пульс покоя, HRV, \
@@ -133,7 +134,10 @@ def pace(speed):
         sec = 1000 / float(speed)
     except (TypeError, ValueError, ZeroDivisionError):
         return None
-    return None if sec > 3600 else f"{int(sec // 60)}:{int(round(sec % 60)) % 60:02d} /км"
+    if sec > 3600:
+        return None
+    m, s = divmod(int(round(sec)), 60)   # сначала округляем, потом делим: без «4:60» и «4:00» вместо «5:00»
+    return f"{m}:{s:02d} /км"
 
 
 def hms(sec):
@@ -203,6 +207,87 @@ def intervals_of(activity_id):
     return out[:60]
 
 
+def _mean(vals):
+    vals = [v for v in vals if v is not None and v > 0]
+    return sum(vals) / len(vals) if vals else None
+
+
+def km_splits(activity_id, split_m=1000.0):
+    """Раскладка строго по километрам из посекундных данных.
+
+    6,2 км -> 6 полных километров + седьмой отрезок 0,2 км. Возвращает [] если
+    потоков нет. Строки в том же формате, что и у intervals.icu (distance,
+    moving_time, average_speed, average_heartrate, average_cadence)."""
+    try:
+        data = icu_get(f"/activity/{activity_id}/streams",
+                       types=["time", "distance", "heartrate", "cadence", "moving"])
+    except Exception:
+        return []
+    streams = {}
+    items = data if isinstance(data, list) else data.get("streams", [])
+    for s in items or []:
+        if isinstance(s, dict) and s.get("type") and isinstance(s.get("data"), list):
+            streams[s["type"]] = s["data"]
+    t, dist = streams.get("time"), streams.get("distance")
+    if not t or not dist or len(t) != len(dist) or len(t) < 2:
+        return []
+    moving = streams.get("moving")
+    hr, cad = streams.get("heartrate"), streams.get("cadence")
+
+    # накопленное время в движении (паузы светофоров и остановки не считаем)
+    cm = [0.0]
+    for i in range(1, len(t)):
+        step = t[i] - t[i - 1]
+        cm.append(cm[-1] + (step if (not moving or moving[i]) else 0))
+
+    def at(target):  # время в движении в точке target метров (линейная интерполяция)
+        lo, hi = 0, len(dist) - 1
+        if target <= dist[0]:
+            return cm[0]
+        if target >= dist[-1]:
+            return cm[-1]
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            if dist[mid] <= target:
+                lo = mid
+            else:
+                hi = mid
+        span = dist[hi] - dist[lo]
+        frac = (target - dist[lo]) / span if span else 0
+        return cm[lo] + (cm[hi] - cm[lo]) * frac
+
+    total = dist[-1]
+    if total < 200:
+        return []
+    out, start, n = [], 0.0, 0
+    while start < total - 1:
+        end = min(start + split_m, total)
+        seg_m = end - start
+        if seg_m < 50 and n:  # крошечный хвост (<50 м) не показываем отдельной строкой
+            break
+        n += 1
+        seg_t = at(end) - at(start)
+        idx = [i for i in range(len(dist)) if start <= dist[i] <= end
+               and (not moving or moving[i])]
+        label = f"{n} км" if seg_m >= split_m - 1 else f"{n} ({seg_m / 1000:.2f})".replace(".", ",")
+        row = {"№": n, "label": label, "distance": round(seg_m)}
+        if seg_t > 0:
+            row["moving_time"] = round(seg_t)
+            row["average_speed"] = round(seg_m / seg_t, 4)
+            row["темп"] = pace(seg_m / seg_t)
+            row["время"] = hms(seg_t)
+        h = _mean([hr[i] for i in idx]) if hr else None
+        c = _mean([cad[i] for i in idx]) if cad else None
+        if h:
+            row["average_heartrate"] = round(h)
+        if c:
+            row["average_cadence"] = c
+            row["каденс_шаг_мин"] = round(c * 2 if c < 120 else c)
+        out.append(row)
+        start = end
+    return out[:120]
+
+
 def athlete_profile():
     try:
         a = icu_get(f"/athlete/{ATHLETE}")
@@ -253,12 +338,21 @@ def workout_report(activity, comment=""):
     d = activity_date(activity)
     hist = [a for a in with_data(activities_between(d - timedelta(days=14), d))
             if a.get("id") != activity.get("id")]
-    laps = intervals_of(activity.get("id"))
+    splits = km_splits(activity.get("id"))
+    auto = intervals_of(activity.get("id"))
+    laps = splits or auto   # для таблицы и графиков в PDF: километры, а без них — интервалы
     profile = athlete_profile()
     payload = {
         "сегодня": date.today().isoformat(),
         "текущая_тренировка": slim_activity(activity),
-        "круги_и_отрезки": laps,
+        "раскладка_по_километрам": splits or "недоступна (нет посекундных данных)",
+        "автоопределённые_интервалы_intervals_icu": auto,
+        "пояснение_к_раскладке": ("раскладка_по_километрам — точные километры тренировки; "
+                                  "последний отрезок может быть короче километра, его длина "
+                                  "указана в скобках. Автоопределённые интервалы делит сам "
+                                  "intervals.icu по изменению темпа/пульса, это НЕ километры: "
+                                  "используй их только чтобы понять структуру (разминка, "
+                                  "отрезки, заминка), и не называй их километрами."),
         "профиль_и_зоны_спортсмена": profile,
         "тренировки_за_14_дней_до_этой": [slim_activity(a) for a in hist],
         "восстановление_7_дней_до_тренировки": [slim_wellness(w) for w in wellness(d)],

@@ -121,13 +121,20 @@ st = {
 
 
 def fmt_pace(sec):
-    return f"{int(sec // 60)}:{int(round(sec % 60)):02d}"
+    m, s = divmod(int(round(sec)), 60)
+    return f"{m}:{s:02d}"
+
+
+def _is_km(laps):
+    return bool(laps) and all(str(l.get("label", "")).endswith("км") or "(" in str(l.get("label", ""))
+                              for l in laps)
 
 
 def chart_laps(laps):
     """Темп (столбики) и пульс (линия) по отрезкам; пустые ряды пропускаются."""
     x = list(range(1, len(laps) + 1))
     labels = [l["label"] for l in laps]
+    unit = "километрам" if _is_km(laps) else "отрезкам"
     has_pace = sum(1 for l in laps if l.get("pace_s")) >= 2
     has_hr = sum(1 for l in laps if l.get("hr")) >= 2
     rows = int(has_pace) + int(has_hr)
@@ -148,13 +155,13 @@ def chart_laps(laps):
                bottom=[min(p, hi) if p else base for p in pace], color=PACE_C, width=0.62)
         ax.set_ylim(base, lo - 12)
         ax.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(
-            lambda v, _: f"{int(v // 60)}:{int(v % 60):02d}"))
+            lambda v, _: fmt_pace(v)))
         if small:
             for xi, p in zip(x, pace):
                 if p:
                     ax.text(xi, min(p, hi) - 1.5, fmt_pace(p), ha="center", va="bottom",
                             fontsize=6.5, color="#1F2328")
-        ax.set_title("Темп по отрезкам, мин/км (выше — быстрее)", fontsize=9, loc="left",
+        ax.set_title(f"Темп по {unit}, мин/км (выше — быстрее)", fontsize=9, loc="left",
                      color="#1F2328")
     if has_hr:
         ax2 = axes[k]
@@ -166,7 +173,7 @@ def chart_laps(laps):
                          color="#1F2328")
         hv = [p[1] for p in pts]
         ax2.set_ylim(min(hv) - 6, max(hv) + 9)
-        ax2.set_title("Пульс по отрезкам, уд/мин", fontsize=9, loc="left", color="#1F2328")
+        ax2.set_title(f"Пульс по {unit}, уд/мин", fontsize=9, loc="left", color="#1F2328")
     last = axes[-1]
     last.set_xticks(x)
     step = 1 if len(x) <= 16 else max(1, len(x) // 12)
@@ -311,7 +318,7 @@ def build_pdf(path, w, coach_text, demo=False):
             ("LINEBELOW", (0, 0), (-1, 0), 0.8, colors.HexColor("#D1D5DB")),
             ("TOPPADDING", (0, 0), (-1, -1), 3.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 3.5),
         ]))
-        title = Paragraph("Круги и отрезки", st["h2"])
+        title = Paragraph("Раскладка по километрам" if _is_km(w["laps"]) else "Круги и отрезки", st["h2"])
         story += [KeepTogether([title, tbl])] if len(rows) <= 25 else [title, tbl]
     story += text_to_flowables(coach_text)
     doc.build(story, onFirstPage=decor, onLaterPages=decor)
