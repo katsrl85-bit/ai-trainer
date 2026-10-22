@@ -80,12 +80,14 @@ def _custom_font(var_b64, var_file, name):
         return None
 
 
-_reg = _custom_font("LM_FONT_B64", "LM_FONT_FILE", "lm-regular")
-_bold = _custom_font("LM_FONT_BOLD_B64", "LM_FONT_BOLD_FILE", "lm-bold")
+# По умолчанию — Liberation Sans (метрически совпадает с Arial). LM Main — только если PDF_FONT=lm.
+_use_lm = os.environ.get("PDF_FONT", "").lower() == "lm"
+_reg = _custom_font("LM_FONT_B64", "LM_FONT_FILE", "lm-regular") if _use_lm else None
+_bold = _custom_font("LM_FONT_BOLD_B64", "LM_FONT_BOLD_FILE", "lm-bold") if _use_lm else None
 if _reg:
     REG, BOLD = _reg, _bold or _reg   # нет жирного начертания — заголовки обычным
 else:
-    REG, BOLD = FONT_DIR + "DejaVuSans.ttf", FONT_DIR + "DejaVuSans-Bold.ttf"
+    REG, BOLD = FONT_DIR + "LiberationSans-Regular.ttf", FONT_DIR + "LiberationSans-Bold.ttf"
 pdfmetrics.registerFont(TTFont("Sans", REG))
 pdfmetrics.registerFont(TTFont("Sans-Bold", BOLD))
 from reportlab.lib.fonts import addMapping
@@ -253,9 +255,28 @@ class HeadingBar(Paragraph):
         super().draw()
 
 
+_CMAP = None
+
+
+def _clean(text):
+    """Убирает символы, которых нет в шрифте (эмодзи и т.п.), чтобы не было пустых квадратов."""
+    global _CMAP
+    if _CMAP is None:
+        try:
+            from fontTools.ttLib import TTFont as _FT
+            _CMAP = set(_FT(REG).getBestCmap())
+        except Exception:
+            _CMAP = False
+    text = text.replace("✓", "+").replace("✔", "+").replace("✗", "−")
+    if not _CMAP:
+        return text
+    return "".join(ch for ch in text if ch in "\n\t" or ord(ch) in _CMAP)
+
+
 def text_to_flowables(text):
     """Разбор тренера -> абзацы. Строка '## Заголовок' — раздел, '- ' — пункт списка."""
     out = []
+    text = _clean(text)
     for block in text.strip().split("\n\n"):
         for line in block.strip().split("\n"):
             line = line.strip()
